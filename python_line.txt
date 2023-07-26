@@ -1,0 +1,15 @@
+python main_growth.py --model deit_tiny_distilled_patch16_224 --batch-size 32 --finetune https://dl.fbaipublicfiles.com/deit/deit_tiny_distilled_patch16_224-b40b3cf7.pth --lr 5e-6 --weight-decay 1e-8 --epochs 100 --min-lr 5e-6 --data-set CIFAR10 --data-path C:\Users\akash\FILES\Research\intrinsic\Datasets\CIFAR10-New --split_epochs 50
+
+python main_growth_node.py --model deit_tiny_distilled_patch16_224 --batch-size 32 --data-set IM100 --data-path C:\Users\akash\FILES\Research\Growth\imagenet100 --split_epochs 50 --top_percent 20 --layer_percent 50
+
+/mnt/nas1/ath104/datasets/CIFAR10-New
+
+python main_growth.py --model deit_tiny_distilled_patch16_224 --batch-size 128 --finetune https://dl.fbaipublicfiles.com/deit/deit_tiny_distilled_patch16_224-b40b3cf7.pth --epochs 100 --data-set CIFAR10 --data-path /mnt/nas1/ath104/datasets/CIFAR10-New --split_epochs 50
+
+python main_growth_node.py --model deit_tiny_patch16_224_6_heads --batch-size 512 --finetune https://dl.fbaipublicfiles.com/deit/deit_tiny_patch16_224-a1311bcf.pth --epochs 300 --data-set CIFAR10 --data-path /mnt/nas1/ath104/datasets/CIFAR10-New --split_epochs 30 --folder split_models/nodewise_30_split_20top_50layer --top_percent 20 --layer_percent 50
+
+ tar -czvf eig_trained_latest.tar.gz eig/
+
+python dropup.py --upload_path /a --file_path trained_models_eig_latest.tar.gz
+
+python main_growth_node_attn.py --model deit_tiny_distilled_patch16_224 --batch-size 128 --finetune https://dl.fbaipublicfiles.com/deit/deit_tiny_distilled_patch16_224-b40b3cf7.pth --epochs 100 --data-set CIFAR10 --data-path C:\Users\akash\FILES\Research\intrinsic\Datasets\CIFAR10-New --split_epochs 30 --top_percent 20 --layer_percent 50 --num_layers 5
