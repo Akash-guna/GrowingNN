@@ -1,5 +1,3 @@
-# Copyright (c) 2015-present, Facebook, Inc.
-# All rights reserved.
 import argparse
 import datetime
 import numpy as np
@@ -22,16 +20,18 @@ from engine import train_one_epoch, evaluate
 from losses import DistillationLoss
 from samplers import RASampler
 from augment import new_data_aug_generator
-from growth_utils_node import *
+from growth_utils_node_new import *
 
-
+import gc
 import models
 import models_v2
 
 import utils
 import time
-
-
+import wandb
+import GPUtil
+import gc
+import psutil
 def get_args_parser():
     parser = argparse.ArgumentParser('DeiT training and evaluation script', add_help=False)
     parser.add_argument('--batch-size', default=64, type=int)
@@ -108,15 +108,15 @@ def get_args_parser():
     parser.add_argument('--repeated-aug', action='store_true')
     parser.add_argument('--no-repeated-aug', action='store_false', dest='repeated_aug')
     parser.set_defaults(repeated_aug=True)
-    
+
     parser.add_argument('--train-mode', action='store_true')
     parser.add_argument('--no-train-mode', action='store_false', dest='train_mode')
     parser.set_defaults(train_mode=True)
-    
+
     parser.add_argument('--ThreeAugment', action='store_true') #3augment
-    
+
     parser.add_argument('--src', action='store_true') #simple random crop
-    
+
     # * Random Erase params
     parser.add_argument('--reprob', type=float, default=0.25, metavar='PCT',
                         help='Random erase prob (default: 0.25)')
@@ -151,8 +151,8 @@ def get_args_parser():
 
     # * Finetuning params
     parser.add_argument('--finetune', default='', help='finetune from checkpoint')
-    parser.add_argument('--attn-only', action='store_true') 
-    
+    parser.add_argument('--attn-only', action='store_true')
+
     # Dataset parameters
     parser.add_argument('--data-path', default='/datasets01/imagenet_full_size/061417/', type=str,
                         help='dataset path')
@@ -178,6 +178,7 @@ def get_args_parser():
                         help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
     parser.add_argument('--no-pin-mem', action='store_false', dest='pin_mem',
                         help='')
+    parser.add_argument('--cp',default='models/checkpoint')
     parser.set_defaults(pin_mem=True)
 
     # distributed training parameters
@@ -189,6 +190,12 @@ def get_args_parser():
     parser.add_argument('--folder', default='', help='model_folder')
     parser.add_argument('--layer_percent', default=40, type=int, help='Layer_Percentage')
     parser.add_argument('--top_percent', default=20, type=int, help='Number of Epochs between each split')
+    parser.add_argument('--resume_growth',default='',help='Path to resume growth from')
+    parser.add_argument('--wandb',default= "", help ="Name of WandB Run")
+    parser.add_argument('--num_layers', default=10, type=int, help='Number of Epochs between each split')
+    parser.add_argument('--split_warmup',default=0,type=int,help='Split Warmup' )
+    parser.add_argument('--param_budget',default = 580000, type =int, help ='Number of Parameters per split')
+    parser.add_argument('--initwarm',default=0,type =int , help="Initial Warmup")
     return parser
 
 
@@ -197,17 +204,37 @@ def main(args):
 
     print(args)
 
+    config={
+    "architecture": "deit-tiny-growth-step-lr",
+    "baseline": "False",
+    "dataset": "ImageNet-100",
+    "epochs": 300,
+    }
+    if args.wandb != "":
+          utils.init_wandb("GrowingNN",args.wandb,config)
+
     if args.distillation_type != 'none' and args.finetune and not args.eval:
         raise NotImplementedError("Finetuning with distillation not yet supported")
 
     device = torch.device(args.device)
 
     # fix the seed for reproducibility
-    seed = args.seed + utils.get_rank()
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+    #seed = args.seed + utils.get_rank()
+    #torch.manual_seed(seed)
+    #np.random.seed(seed)
     # random.seed(seed)
-
+    def seed_everything(seed: int):
+        import random, os
+        import numpy as np
+        import torch
+        random.seed(seed)
+        os.environ['PYTHONHASHSEED'] = str(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = True
+    seed_everything(42)
     cudnn.benchmark = True
 
     dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
@@ -254,7 +281,8 @@ def main(args):
         pin_memory=args.pin_mem,
         drop_last=False
     )
-
+    x,y = next(iter(data_loader_val))
+    print("X shape",x.shape)
     mixup_fn = None
     mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
     if mixup_active:
@@ -274,7 +302,7 @@ def main(args):
         img_size=args.input_size
     )
 
-                    
+
     if args.finetune:
         if args.finetune.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(
@@ -310,7 +338,7 @@ def main(args):
         checkpoint_model['pos_embed'] = new_pos_embed
 
         model.load_state_dict(checkpoint_model, strict=False)
-        
+
     if args.attn_only:
         for name_p,p in model.named_parameters():
             if '.attn.' in name_p:
@@ -332,7 +360,7 @@ def main(args):
                 p.requires_grad = False
         except:
             print('no patch embed')
-            
+
     model.to(device)
 
     model_ema = None
@@ -348,7 +376,10 @@ def main(args):
     block_count=0
     print(model)
     model = growth_wrapper(model)
-    print(sum([p.numel() for p in model.parameters()]))
+    if args.resume_growth !='':
+       model=torch.load(args.resume_growth)
+       print(model)
+       model.train()
     model_without_ddp = model
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
@@ -358,6 +389,7 @@ def main(args):
     if not args.unscale_lr:
         linear_scaled_lr = args.lr * args.batch_size * utils.get_world_size() / 512.0
         args.lr = linear_scaled_lr
+    print("Learning Rate",args.lr)
     optimizer = create_optimizer(args, model_without_ddp)
     loss_scaler = NativeScaler()
 
@@ -372,12 +404,11 @@ def main(args):
         criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
     else:
         criterion = torch.nn.CrossEntropyLoss()
-        
+
     if args.bce_loss:
         criterion = torch.nn.BCEWithLogitsLoss()
-        
+
     teacher_model = None
-    
     if args.distillation_type != 'none':
         assert args.teacher_path, 'need to specify teacher-path when using distillation'
         print(f"Creating teacher model: {args.teacher_model}")
@@ -404,32 +435,33 @@ def main(args):
 
     output_dir = Path(args.output_dir)
     if args.resume:
-        if args.resume.startswith('https'):
-            checkpoint = torch.hub.load_state_dict_from_url(
-                args.resume, map_location='cpu', check_hash=True)
-        else:
-            checkpoint = torch.load(args.resume, map_location='cpu')
-        model_without_ddp.load_state_dict(checkpoint['model'])
-        if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-            args.start_epoch = checkpoint['epoch'] + 1
-            if args.model_ema:
-                utils._load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
-            if 'scaler' in checkpoint:
-                loss_scaler.load_state_dict(checkpoint['scaler'])
-        lr_scheduler.step(args.start_epoch)
-    #wraps the growth class
-    
+        del model,model_without_ddp,optimizer,lr_scheduler,loss_scaler
+        gc.collect()
+        torch.cuda.empty_cache()
+        checkpoint=torch.load(args.resume,map_location=torch.device(device))
+        model_without_ddp = checkpoint['model']
+        model_without_ddp.train()
+        model_without_ddp.to(device)
+        optimizer= checkpoint['optimizer']
+        lr_scheduler=checkpoint['lr_scheduler']
+        loss_scaler=checkpoint['scaler']
+        del checkpoint
+        if args.distributed:
+                model = torch.nn.parallel.DistributedDataParallel(model_without_ddp, device_ids=[args.gpu])
+                model_without_ddp = model.module
+
+    print(sum([p.numel() for p in model.parameters()]))
     if args.eval:
         test_stats = evaluate(data_loader_val, model, device)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         return
-
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
     max_accuracy = 0.0
     split_count=0
+    cn=0
+    print("Utilization after Initialization")
+    GPUtil.showUtilization()
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
@@ -441,8 +473,6 @@ def main(args):
             set_training_mode=args.train_mode,  # keep in eval mode for deit finetuning / train mode for training and deit III finetuning
             args = args,
         )
-
-
         lr_scheduler.step(epoch)
         if args.output_dir:
             checkpoint_paths = [output_dir / 'checkpoint.pth']
@@ -452,17 +482,24 @@ def main(args):
                     'optimizer': optimizer.state_dict(),
                     'lr_scheduler': lr_scheduler.state_dict(),
                     'epoch': epoch,
-                    
                     'scaler': loss_scaler.state_dict(),
                     'args': args,
                 }, checkpoint_path)
-             
 
         test_stats = evaluate(data_loader_val, model, device)
+        print(train_stats.keys(),test_stats.keys())
+        n_parameters = sum(p.numel() for p in model_without_ddp.parameters() if p.requires_grad)
+
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
-        
+        if args.wandb !="":
+            utils.log_wandb({"train_lr":train_stats['lr'],"train_loss":train_stats['loss'],'test_loss':test_stats['loss'],'test_acc1':test_stats['acc1'],'test_acc5':test_stats['acc5'],"model_params":n_parameters})
+
         if max_accuracy < test_stats["acc1"]:
             max_accuracy = test_stats["acc1"]
+            if utils.is_main_process():
+                os.makedirs(args.cp,exist_ok=True)
+                torch.save(model_without_ddp,f"{args.cp}/{cn}_{int(max_accuracy)}.pt")
+                cn+=1
             # if args.output_dir:
             #     checkpoint_paths = [output_dir / 'best_checkpoint.pth']
             #     for checkpoint_path in checkpoint_paths:
@@ -475,36 +512,101 @@ def main(args):
             #             'scaler': loss_scaler.state_dict(),
             #             'args': args,
             #         }, checkpoint_path)
-            
+
         print(f'Max accuracy: {max_accuracy:.2f}%')
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      **{f'test_{k}': v for k, v in test_stats.items()},
                      'epoch': epoch,
                      'n_parameters': n_parameters}
-        
-        
-        
-        
+
+
+        print("Utilization after Epoch")
+        GPUtil.showUtilization()
+
+
         if args.output_dir and utils.is_main_process():
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
         #add epoch ! =0
-        if args.split_epochs !=-1:
-            if epoch !=0 and epoch%args.split_epochs==0:
+        if args.split_epochs !=-1 and epoch >args.initwarm:
+            if epoch !=0 and (epoch-args.initwarm)%args.split_epochs==0:
                 print("Splitting")
                 print(args.top_percent,args.layer_percent)
-                split_nodewise(model,args.top_percent,args.layer_percent)
-                #split(model)
-                model.to(device)
+                #ldr = {'train':data_loader_train,'test':data_loader_val}
+                if utils.is_main_process():
+                    print("Utilization Before Splitting")
+                    GPUtil.showUtilization()
+
+                    split_nodewise(model_without_ddp,args.param_budget,args.top_percent,args.split_warmup)
+                    model_without_ddp.to(device)
+                    #print(model.module)
+
+                    print("Utilization after Splitting")
+                    GPUtil.showUtilization()
+
+                    split_count+=1
+                    print(model_without_ddp)
+                    os.makedirs(args.folder,exist_ok=True)
+                    #torch.save(model_without_ddp, f"{args.folder}/{split_count}.pt")
+                    utils.save_on_master({
+                                                'model': model_without_ddp,
+                                                'optimizer': optimizer,
+                                                'lr_scheduler': lr_scheduler,
+                                                'epoch': epoch,
+                                                'scaler': loss_scaler,
+                                                'args': args,
+                                               },f"{args.folder}/{split_count}.pt")
+                    #torch.save(model, f"splitted model {split_count}.pt")
+                    print(f'World Size = {utils.get_world_size()}')
+                    for r in range(utils.get_world_size()):
+                          #torch.save(model_without_ddp,f"{args.folder}/chk_{r}.pt")
+                          utils.save_on_master({
+                                                'model': model_without_ddp,
+                                                'optimizer': optimizer,
+                                                'lr_scheduler': lr_scheduler,
+                                                'epoch': epoch,
+                                                'scaler': loss_scaler,
+                                                'args': args,
+                                               },f"{args.folder}/chk_{r}.pt")
+
+                torch.distributed.barrier()
+                if not utils.is_main_process():
+                    remove_garbage(model_without_ddp)
+                torch.distributed.barrier()
+                print("GPU Utilization after Garbage_removal")
+                GPUtil.showUtilization()
+
                 split_count+=1
-                print(model)
-                os.makedirs(args.folder,exist_ok=True)
-                torch.save(model, f"{args.folder}/{split_count}.pt")
-                #torch.save(model, f"splitted model {split_count}.pt")
+                model_without_ddp.to("cpu")
+                del model,model_without_ddp,optimizer,lr_scheduler,loss_scaler
+                checkpoint=torch.load(f"{args.folder}/chk_{utils.get_rank()}.pt",map_location=torch.device(device))
+                model_without_ddp = checkpoint['model']
+                model_without_ddp.train()
+                model_without_ddp.to(device)
+                optimizer= checkpoint['optimizer']
+                lr_scheduler=checkpoint['lr_scheduler']
+                loss_scaler=checkpoint['scaler']
 
+                if args.distributed:
+                        model = torch.nn.parallel.DistributedDataParallel(model_without_ddp, device_ids=[args.gpu])
+                        model_without_ddp = model.module
+
+                print_all_requires_grad(model.module)
+                print("reached_here")
+                model_without_ddp=set_all_trainable(model_without_ddp)
+                print_all_requires_grad(model.module)
+                #print(model)
+                print(f"Rank {utils.get_rank()} Successful")
+                torch.distributed.barrier()
+                print("GPU Utilization after Splitting")
+                GPUtil.showUtilization()
+                gc.collect()
+                torch.cuda.empty_cache()
+                print("GPU Utilization after Emptying Cache")
+                GPUtil.showUtilization()
                 print(f"Split Count = {split_count}")
-
+                print("CPU usage" , psutil.cpu_percent(5))
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))

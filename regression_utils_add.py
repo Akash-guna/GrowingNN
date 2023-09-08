@@ -9,22 +9,6 @@ from torch.utils.data import Dataset,DataLoader
 from sklearn.model_selection import train_test_split
 
 def train(net,loaders,input_size=784,EPOCHS=5,loss_func = nn.CrossEntropyLoss(),opt =optim.Adam,evaluate=True,verbose=True ):
-    '''
-    Main Training Method for regression. 
-    Input -> Model
-    loader -> data Loaders
-    input_size -> input size for linear layer
-    epochs -> Number of epochs
-    loss_func -> Loss Function
-    opt -> Optimizer
-    verbose -> Verbose
-
-    Outputs:
-    loss_arr : Contains loss from each epoch
-    train_acc_arr: Contain train acc for each epoch
-    test_acc_arr: Contains test acc for each epoch
-    net : trained model
-    '''
     if verbose==True:
         print(net)
 #     loss_func = nn.CrossEntropyLoss()
@@ -41,12 +25,14 @@ def train(net,loaders,input_size=784,EPOCHS=5,loss_func = nn.CrossEntropyLoss(),
             y = y.cuda()
             if X.shape[0] !=BATCH_SIZE:
                 break
+            #print(X.shape,y.shape)
             net.zero_grad()
             output = net(X.view(-1, input_size))
+            #print(output.shape)
             loss = loss_func(output, y)
             loss.backward()
             optimizer.step()
-            
+            #print(net.layer_dict['0'].weight.grad.shape)
         correct = 0
         total = 0
         if evaluate ==True:
@@ -101,13 +87,27 @@ def train(net,loaders,input_size=784,EPOCHS=5,loss_func = nn.CrossEntropyLoss(),
 
     return (loss_arr,train_acc_arr,test_acc_arr),net
 
+# class IntermediateRegressionModel(nn.Module):
+#     # Splitting Fc2
+#     def __init__(self,outputlayer,out_nodes,num_nodes):
+#         super(IntermediateRegressionModel,self).__init__()
+        
+#         self.num_nodes= num_nodes
+#         self.new_layer = nn.Linear(outputlayer.in_features,self.num_nodes)
+#         self.fb = nn.Linear(self.num_nodes,int(self.num_nodes/2))
+#         self.skip_fc = nn.Linear(self.num_nodes,out_nodes )
+#         self.output_layer = nn.Linear(int(self.num_nodes/2),out_nodes)
+#         self.gelu = nn.GELU()
+#     def forward(self,x):
+#         x1 = self.gelu(self.new_layer(x))
+#         x2 = self.gelu(self.fb(x1))
+#         skip = self.gelu(self.skip_fc(x1))
+#         x3 = self.output_layer(x2)
+#         x  = x3 + skip
+#         return x
 
 class IntermediateRegressionModel(nn.Module):
-    '''
-    Torch Class for creating Intermediate regression model. 
-    An Intermediate regression model has all layers from a growth block that are regressed (except old_layer)
-    
-    '''
+    # Splitting Fc2
     def __init__(self,outputlayer,out_nodes,num_nodes):
         super(IntermediateRegressionModel,self).__init__()
         
@@ -116,7 +116,6 @@ class IntermediateRegressionModel(nn.Module):
         self.fb = nn.Linear(self.num_nodes,int(self.num_nodes/2))
         self.skip_fc = nn.Linear(self.num_nodes,out_nodes )
         self.output_layer = nn.Linear(int(self.num_nodes/2),out_nodes)
-    
     def forward(self,x):
         x1 = F.prelu(self.new_layer(x),weight=torch.Tensor([0.25]).cuda())
         x2 = F.prelu(self.fb(x1),weight=torch.Tensor([0.25]).cuda())
@@ -126,9 +125,6 @@ class IntermediateRegressionModel(nn.Module):
         return x
 
 class DataModel(nn.Module):
-    '''
-    A Model Used to collect data from a Linear layer for Radom regression. X -> Data Model -> Y
-    '''
     def __init__(self,layer):
         super(DataModel,self).__init__()
         self.inp_features = layer.in_features
@@ -137,9 +133,6 @@ class DataModel(nn.Module):
         return self.layer(x)
     
 class DataLoaderInterm(Dataset):
-    '''
-    A Data Loader Defined for Random Regression / Data Regression
-    '''
     def __init__(self,x,y):
         self.x = x
         self.y = y
@@ -151,15 +144,7 @@ class DataLoaderInterm(Dataset):
         return self.x.shape[0]
 
 BATCH_SIZE=128
-
 def load_data_interm(x,y):
-    '''
-    Function to load data for Random Regression/ Data Regression that calls the Torch data loader
-    input:
-    X,y
-    Output: 
-        Loaders -> A dictionary with train, test data loaders
-    '''
     x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=0.33, random_state=42)
     dl_interm_train = DataLoaderInterm(x_train,y_train)
     dl_interm_test = DataLoaderInterm(x_test,y_test)
@@ -177,17 +162,6 @@ def load_data_interm(x,y):
     return loaders
 
 def generate_intermed_data(model,count,choices):
-    '''
-    Generate Data For Random Regression
-
-    Input: 
-    model -> Intermediate Regression Model Object
-    count -> Number of data samples to be generated
-    choices -> Selected Nodes to split. (y needs to contain only selected nodes of the complete y)
-
-    Output:
-    x,y
-    '''
     model.eval()
     x=[]
     y=[]
@@ -202,49 +176,17 @@ def generate_intermed_data(model,count,choices):
     return x,y
 
 def return_layers(layer,choices,num_nodes=10,samp_size=10000,reg_epochs=100,verbose=False):
-    '''
-    Perform Random Regression for a given layer by constructing the growth block and optimizing the weight such that f(growth_block)= f(Layer)
-
-    Input:
-    layer -> the layer which we want to split 
-    choices -> the indices of selected neurons of layer to split
-    num_nodes -> Number of Neurons to be created for New Layer
-    samp_size -> Sample Size
-    reg_epochs -> The Number of Epochs for Regression
-    Verbose -> True
-
-    Output:
-    4 Layers
-    metrics -> Metrics for training regression
-    '''
-    # Create Regression Model
     intermed_model =IntermediateRegressionModel(layer,len(choices),num_nodes)
-    # Create Model to collect x,y data
     data_model =DataModel(layer)
-    #Generate X,y data using Data Model
     x,y =generate_intermed_data(data_model,samp_size,choices)
-    # Create torch loaders for given x,y
     loaders=load_data_interm(x,y)
-    #Train the regression model with the data
     metrics,intermed_model =train(intermed_model,loaders,EPOCHS=reg_epochs,input_size = layer.in_features, loss_func = nn.MSELoss(),evaluate=False,verbose=verbose)
+    print(intermed_model.parameters)
     print("Intermediate Regrssion Loss = ",metrics[0][-1])
     return [intermed_model.new_layer,intermed_model.fb,intermed_model.output_layer,intermed_model.skip_fc,metrics]
 
 
 def get_intermed_model_data(loaders,choices,model,sel_layer, samples=10000):
-    '''
-    Gets X,y for Data Regression
-
-    Input:
-    sel_layer -> the layer which we want to split 
-    choices -> the indices of selected neurons of layer to split
-    model -> model
-    samples -> Sample Size
-    
-    Output:
-    X,y
-    '''
-
     activation={str(sel_layer):torch.Tensor([])}
     
     def get_activation(name):
@@ -255,6 +197,7 @@ def get_intermed_model_data(loaders,choices,model,sel_layer, samples=10000):
     
     model.layer_dict[str(sel_layer)].register_forward_hook(get_activation(str(sel_layer)))
     for data in loaders["train"]:
+        #print(data[0].shape)
         out = model(data[0].view(-1,3072))
         x = torch.concat([x,data[0]],axis=0)
         if x.shape[0]>=samples:
@@ -262,26 +205,39 @@ def get_intermed_model_data(loaders,choices,model,sel_layer, samples=10000):
     y = activation[str(sel_layer)]
     return x.cuda(),y.cuda()
 
-def return_layers_data(loaders,model,layer,choices,num_nodes=10,samp_size=10000,reg_epochs=100,verbose=False):
-    '''
-    Perform Data Regression for a given layer by constructing the growth block and optimizing the weight such that f(growth_block)= f(Layer)
-
-    Input:
-    layer -> the layer which we want to split 
-    model -> the torch model
-    loaders -> Dataset Loaders
-    choices -> the indices of selected neurons of layer to split
-    num_nodes -> Number of Neurons to be created for New Layer
-    samp_size -> Sample Size
-    reg_epochs -> The Number of Epochs for Regression
-    Verbose -> True
-
-    Output:
-    4 Layers
-    metrics -> Metrics for training regression
-    '''
+def get_intermed_model_data_transformers(loaders,choices,model,layer_data,sel_layer, samples=10000):
+    activation={str(sel_layer):torch.Tensor([])}
+    
+    def get_activation(name):
+        def hook(model, input, output):
+            activation[name]=torch.concat([activation[name],output.detach()[:,choices]],axis=0)
+        return hook
+    x =torch.Tensor([])
+    if layer_data[1]==0:
+        model.blocks[layer_data[0]].attn.qkv.layer_dict[str(sel_layer)].register_forward_hook(get_activation(str(sel_layer)))
+    elif layer_data[1]==1:
+        model.blocks[layer_data[0]].attn.proj.layer_dict[str(sel_layer)].register_forward_hook(get_activation(str(sel_layer)))
+    elif layer_data[1]==2:
+        model.blocks[layer_data[0]].mlp.fc1.layer_dict[str(sel_layer)].register_forward_hook(get_activation(str(sel_layer)))
+    elif layer_data[1]==3:
+        model.blocks[layer_data[0]].mlp.fc2.layer_dict[str(sel_layer)].register_forward_hook(get_activation(str(sel_layer)))
+    else:
+        print("Error")
+    for data in loaders["train"]:
+        #print(data[0].shape)
+        out = model(data[0].view(-1,3072))
+        x = torch.concat([x,data[0]],axis=0)
+        if x.shape[0]>=samples:
+            break
+    y = activation[str(sel_layer)]
+    return x.cuda(),y.cuda()
+def return_layers_data(loaders,model,layer,layer_data,sel_layer,choices,num_nodes=10,samp_size=10000,reg_epochs=100,verbose=False):
+    #print(layer,choices)
     intermed_model =IntermediateRegressionModel(layer,len(choices),num_nodes)
-    x,y=get_intermed_model_data(loaders,choices,model,'0',samples=samp_size)
+    #data_model =DataModel(layer)
+    #x,y = generate_intermed_data(data_model,samp_size,choices)
+    x,y=get_intermed_model_data_transformers(loaders,choices,model,layer_data,str(sel_layer),samples=samp_size)
+    #print(x.shape,y.shape)
     loaders_inter=load_data_interm(x,y)
     inter_met,intermed_model =train(intermed_model,loaders_inter,EPOCHS=reg_epochs,input_size = layer.in_features, loss_func = nn.MSELoss(),evaluate=False,verbose=verbose)
     return [intermed_model.new_layer,intermed_model.fb,intermed_model.output_layer,intermed_model.skip_fc,inter_met]
