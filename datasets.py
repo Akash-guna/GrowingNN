@@ -67,6 +67,7 @@ def build_dataset(is_train, args):
         root = os.path.join(args.data_path, 'train' if is_train else 'val')
         dataset = datasets.ImageFolder(root, transform=transform)
         nb_classes = 1000
+    # Added Imagenet-100 dataset support
     elif args.data_set == 'IM100':
         root = os.path.join(args.data_path, 'train' if is_train else 'val')
         dataset = datasets.ImageFolder(root, transform=transform)
