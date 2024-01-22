@@ -537,8 +537,10 @@ def main(args):
                 if utils.is_main_process():
                     print("Utilization Before Splitting")
                     GPUtil.showUtilization()
-
-                    split_nodewise(model_without_ddp,args.param_budget,args.top_percent,args.split_warmup)
+                    if split_count %2 ==0:
+                        split_nodewise(model_without_ddp,args.param_budget,False,args.top_percent,args.split_warmup)
+                    else:
+                        split_nodewise(model_without_ddp,args.param_budget,True,args.top_percent,args.split_warmup)
                     model_without_ddp.to(device)
                     #print(model.module)
 
