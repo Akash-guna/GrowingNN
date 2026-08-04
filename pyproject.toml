@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "growing-nn"
+version = "0.1.0"
+description = "Growing Neural Networks: a DeiT/ViT training pipeline with dynamic Q/K/V and MLP layer growth (node growth)."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "Apache-2.0" }
+authors = [{ name = "GrowingNN contributors" }]
+dependencies = [
+    "torch>=1.10",
+    "torchvision>=0.11",
+    "timm>=0.5,<0.6",   # pin to the 0.5.x line: this project's own VisionTransformer
+                        # only borrows a handful of helpers from timm (registry,
+                        # layers, optim/scheduler/Mixup/EMA); newer timm releases
+                        # have moved/renamed some of these.
+    "numpy",
+    "joblib",
+    "GPUtil",
+    "matplotlib",
+    "seaborn",          # only needed for growing_nn.scripts.visualize_growth
+    "psutil",
+    "wandb",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov"]
+
+# Console entry point replaces "python main_growth_node_new_p.py ..."
+[project.scripts]
+growing-nn-train-growth = "growing_nn.cli.train_growth:main_cli"
+growing-nn-visualize-growth = "growing_nn.scripts.visualize_growth:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
